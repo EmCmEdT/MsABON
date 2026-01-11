@@ -12,6 +12,8 @@ Once NodeJS is installed, proceed with the setup.
 
 1. Install dependencies:
 
+Navigate to the directory of this downloaded repository and run the command:
+
 ```bash
 npm install
 ```
@@ -118,3 +120,4 @@ The server prints a clickable link to Swagger UI on startup.
 - To change the config file name/location, before starting (`npm start`), set `CONFIG_PATH` env var  (`$env:CONFIG_PATH = 'config.yaml'`).
 - To run multiple APIs from different servers/databases, add multiple entries to `connections`; each `endpoint` yields its own namespaced routes and OpenAPI components.
 - If a connection fails (e.g., DNS down), the server retries every 30 seconds without stopping. When the connection succeeds, routes and the Swagger spec are updated automatically.
+
