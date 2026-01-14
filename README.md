@@ -16,7 +16,9 @@ Once NodeJS is installed, proceed with the setup.
 npm install
 ```
 
-2. Edit `config.yaml` (project root) to describe one or more connections and app settings. Example:
+2. Copy and rename `config.yaml.example` to `config.yaml`
+
+3. Edit `config.yaml` (project root) to describe one or more connections and app settings. Example:
 
 ```yaml
 port: 3000
@@ -49,7 +51,7 @@ Notes about the config fields
   - `server`, `port`, `username`, `password`, `database`: DB connection info.
   - `filter`: a simple regex-like filter (e.g. `^MI`) translated to SQL `LIKE` (becomes `MI%`) to select table/view names.
 
-3. Start server:
+4. Start server:
 
 ```powershell
 npm start
