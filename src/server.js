@@ -205,7 +205,7 @@ async function start() {
   );
 
   // List tables under an endpoint: e.g., http://localhost:PORT/ENDPOINT/
-  app.get('/:endpoint/', (req, res) => {
+  app.get('/:endpoint([A-Za-z0-9_-]+)/', (req, res) => {
     const endpoint = req.params.endpoint;
     const schemas = openApi.components?.schemas || {};
 
