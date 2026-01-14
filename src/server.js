@@ -45,8 +45,8 @@ async function start() {
   app.use(cors());
   app.use(express.json());
 
-  // health
-  app.get('/health', (req, res) => res.json({ ok: true }));
+  // health check
+  app.get('/', (req, res) => res.json({ ok: true }));
 
   // request logging middleware
   app.use((req, res, next) => {
@@ -203,6 +203,37 @@ async function start() {
       }
     })
   );
+
+  // List tables under an endpoint: e.g., http://localhost:PORT/ENDPOINT/
+  app.get('/:endpoint/', (req, res) => {
+    const endpoint = req.params.endpoint;
+    const schemas = openApi.components?.schemas || {};
+
+    const names = Object.keys(schemas).filter(name => name.startsWith(`${endpoint}_`));
+    const tables = [];
+    const views = [];
+
+    for (const name of names) {
+      const sch = schemas[name] || {};
+      const entity = name.split('_').slice(1).join('_'); // strip "<endpoint>_"
+
+      if (sch['x-msabon-isView'] === true) {
+        views.push(entity);
+      } else {
+        tables.push(entity);
+      }
+    }
+
+    // Optional: sort alphabetically
+    tables.sort();
+    views.sort();
+
+    if (tables.length === 0 && views.length === 0) {
+      return res.status(404).json({ error: `No objects found for endpoint '${endpoint}'.` });
+    }
+
+    res.json({ endpoint, tables, views });
+  });
 
   // JSON endpoint serving the current spec
   app.get('/swagger.json', (req, res) => res.json(openApi));
