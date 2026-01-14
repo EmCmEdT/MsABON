@@ -2,11 +2,6 @@ function ts() {
   return new Date().toISOString();
 }
 
-function mask(s) {
-  if (!s) return s;
-  return '*****';
-}
-
 function info(...args) {
   console.log(`[INFO] ${ts()} -`, ...args);
 }
@@ -23,4 +18,4 @@ function verbose(...args) {
   console.log(`[VERBOSE] ${ts()} -`, ...args);
 }
 
-module.exports = { info, warn, error, verbose, mask };
+module.exports = { info, warn, error, verbose };
