@@ -118,7 +118,7 @@ The server prints a clickable link to Swagger UI on startup.
 ## Logging & safety
 
 - The console logger is verbose by default; you will see timestamped `INFO`, `WARN`, `ERROR`, and `VERBOSE` messages about discovery and executed SQL (parameters are shown; passwords are not printed).
-- Passwords are not printed; sensitive values are masked in high-level logs.
+- Database passwords are not printed.
 
 ## Magic numbers / hard-coded defaults
 
