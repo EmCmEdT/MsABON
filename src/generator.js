@@ -1,6 +1,35 @@
 const sql = require('mssql');
 const logger = require('./logger');
 
+async function hasEnabledTriggers(pool, schema, table) {
+  const res = await pool.request()
+    .input('schema', sql.NVarChar, schema)
+    .input('table', sql.NVarChar, table)
+    .query(`
+      SELECT COUNT(*) AS cnt
+      FROM sys.triggers tr
+      JOIN sys.tables t ON tr.parent_id = t.object_id
+      WHERE tr.is_disabled = 0
+        AND t.name = @table
+        AND SCHEMA_NAME(t.schema_id) = @schema
+    `);
+  return (res.recordset[0]?.cnt || 0) > 0;
+}
+
+async function getIdentityColumn(pool, schema, table) {
+  const res = await pool.request()
+    .input('schema', sql.NVarChar, schema)
+    .input('table', sql.NVarChar, table)
+    .query(`
+      SELECT c.name AS COLUMN_NAME
+      FROM sys.identity_columns ic
+      JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+      JOIN sys.tables t ON t.object_id = ic.object_id
+      WHERE t.name = @table AND SCHEMA_NAME(t.schema_id) = @schema
+    `);
+  return res.recordset[0]?.COLUMN_NAME || null;
+}
+
 function mapSqlTypeToMssqlType(col) {
   const t = col.DATA_TYPE.toLowerCase();
   if (t.includes('char') || t === 'text' || t === 'ntext') {
@@ -191,10 +220,53 @@ function registerRoutes(app, tableMeta, endpoint) {
           }
         }
 
-        const sqlText = `INSERT INTO ${qName(schema, table)} (${cols.join(',')}) OUTPUT inserted.* VALUES (${vals.join(',')})`;
+        let sqlText;
+        if (tableMeta.hasTriggers) {
+          if (tableMeta.identity) {
+            // Best path: insert then reselect by SCOPE_IDENTITY on the identity column
+            sqlText = `
+              SET NOCOUNT ON;
+              INSERT INTO ${qName(schema, table)} (${cols.join(',')})
+              VALUES (${vals.join(',')});
+              DECLARE @id numeric(38,0) = SCOPE_IDENTITY();
+              SELECT * FROM ${qName(schema, table)} WHERE [${tableMeta.identity}] = @id;
+            `;
+          } else if (tableMeta.pk && req.body[tableMeta.pk[0]] !== undefined) {
+            // No identity but PK provided in body -> reselect by PK
+            sqlText = `
+              SET NOCOUNT ON;
+              INSERT INTO ${qName(schema, table)} (${cols.join(',')})
+              VALUES (${vals.join(',')});
+              SELECT * FROM ${qName(schema, table)} WHERE [${tableMeta.pk[0]}] = @${tableMeta.pk[0]};
+            `;
+          } else {
+            // Fallback: create #out without identity using expression on identity (if any)
+            const outSelect = tableMeta.columns.map(c => {
+              return c.COLUMN_NAME === tableMeta.identity
+                ? `t.[${c.COLUMN_NAME}] + 0 AS [${c.COLUMN_NAME}]`
+                : `t.[${c.COLUMN_NAME}]`;
+            }).join(', ');
+            sqlText = `
+              SET NOCOUNT ON;
+              IF OBJECT_ID('tempdb..#out') IS NOT NULL DROP TABLE #out;
+              SELECT TOP 0 ${outSelect} INTO #out FROM ${qName(schema, table)} AS t WHERE 1 = 0;
+
+              INSERT INTO ${qName(schema, table)} (${cols.join(',')})
+              OUTPUT inserted.* INTO #out
+              VALUES (${vals.join(',')});
+
+              SELECT * FROM #out;
+              DROP TABLE #out;
+            `;
+          }
+        } else {
+          sqlText = `INSERT INTO ${qName(schema, table)} (${cols.join(',')}) OUTPUT inserted.* VALUES (${vals.join(',')})`;
+        }
+
         logger.verbose('Executing SQL:', sqlText, 'params=', request.parameters);
-        const result = await request.query(sqlText);
-        res.status(201).json(result.recordset[0]);
+        const r = await request.query(sqlText);
+        const out = Array.isArray(r.recordsets) && r.recordsets[r.recordsets.length - 1] || r.recordset;
+        res.status(201).json(out && out[0] || {});
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
@@ -220,11 +292,23 @@ function registerRoutes(app, tableMeta, endpoint) {
 
         if (sets.length === 0) return res.status(400).json({ error: 'No updatable fields provided' });
 
-        const sqlText = `UPDATE ${qName(schema, table)} SET ${sets.join(', ')} OUTPUT inserted.* WHERE [${pk}] = @${pk}`;
+        let sqlText;
+        if (tableMeta.hasTriggers) {
+          sqlText = `
+            SET NOCOUNT ON;
+            UPDATE ${qName(schema, table)} SET ${sets.join(', ')} WHERE [${pk}] = @${pk};
+            SELECT * FROM ${qName(schema, table)} WHERE [${pk}] = @${pk};
+          `;
+        } else {
+          // Original (no triggers)【24-1】
+          sqlText = `UPDATE ${qName(schema, table)} SET ${sets.join(', ')} OUTPUT inserted.* WHERE [${pk}] = @${pk}`;
+        }
+
         logger.verbose('Executing SQL:', sqlText, 'params=', request.parameters);
-        const result = await request.query(sqlText);
-        if (result.recordset.length === 0) return res.status(404).end();
-        res.json(result.recordset[0]);
+        const r = await request.query(sqlText);
+        const out = Array.isArray(r.recordsets) && r.recordsets[r.recordsets.length - 1] || r.recordset;
+        if (!out || out.length === 0) return res.status(404).end();
+        res.json(out[0]);
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
@@ -237,15 +321,41 @@ function registerRoutes(app, tableMeta, endpoint) {
         const request = pool.request();
         const pkCol = tableMeta.columns.find(c => c.COLUMN_NAME === pk) || {};
         request.input(pk, mapSqlTypeToMssqlType(pkCol), req.params[pk]);
-        const sqlText = `DELETE FROM ${qName(schema, table)} OUTPUT deleted.* WHERE [${pk}] = @${pk}`;
+
+        let sqlText;
+        if (tableMeta.hasTriggers) {
+          const outSelect = tableMeta.columns.map(c => {
+            return c.COLUMN_NAME === tableMeta.identity
+              ? `t.[${c.COLUMN_NAME}] + 0 AS [${c.COLUMN_NAME}]`
+              : `t.[${c.COLUMN_NAME}]`;
+          }).join(', ');
+          sqlText = `
+            SET NOCOUNT ON;
+            IF OBJECT_ID('tempdb..#out') IS NOT NULL DROP TABLE #out;
+            SELECT TOP 0 ${outSelect} INTO #out FROM ${qName(schema, table)} AS t WHERE 1 = 0;
+
+            DELETE FROM ${qName(schema, table)}
+            OUTPUT deleted.* INTO #out
+            WHERE [${pk}] = @${pk};
+
+            SELECT * FROM #out;
+            DROP TABLE #out;
+          `;
+        } else {
+          // Original (no triggers)【24-1】
+          sqlText = `DELETE FROM ${qName(schema, table)} OUTPUT deleted.* WHERE [${pk}] = @${pk}`;
+        }
+
         logger.verbose('Executing SQL:', sqlText, 'params=', request.parameters);
-        const result = await request.query(sqlText);
-        if (result.recordset.length === 0) return res.status(404).end();
-        res.json(result.recordset[0]);
+        const r = await request.query(sqlText);
+        const out = Array.isArray(r.recordsets) && r.recordsets[r.recordsets.length - 1] || r.recordset;
+        if (!out || out.length === 0) return res.status(404).end();
+        res.json(out[0]);
       } catch (err) {
         res.status(500).json({ error: err.message });
       }
     });
+    
   }
 }
 
@@ -278,8 +388,9 @@ async function setupDynamicRoutes(app, pool, endpointConfig) {
     const columns = await getColumns(pool, schema, table);
     // Views are read-only; skip PK lookup
     const pk = isView ? [] : await getPrimaryKey(pool, schema, table);
-
-    const meta = { schema, table, columns, pk, pool, isView };
+    const hasTriggers = await hasEnabledTriggers(pool, schema, table);
+    const identity = await getIdentityColumn(pool, schema, table);
+    const meta = { schema, table, columns, pk, pool, isView, hasTriggers, identity };
     registerRoutes(app, meta, endpoint);
 
     if (process.env.DEBUG_ROUTES) {
